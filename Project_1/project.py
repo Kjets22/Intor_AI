@@ -1,9 +1,15 @@
 
+from xmlrpc.client import MAXINT
+from operator import le
+from pickle import FALSE
+
 import random
 import heapq
 from collections import deque
 import pygame
 import sys
+
+from pygame.math import clamp
 
 #############################
 # Maze (Ship) Generation
@@ -108,6 +114,7 @@ def bfs_path(grid, start, goal, obstacles=set()):
     if goal not in came_from:
         return None
     # Reconstruct path
+    # return goal_found(came_from,goal)
     path = []
     cur = goal
     while cur is not None:
@@ -116,61 +123,95 @@ def bfs_path(grid, start, goal, obstacles=set()):
     path.reverse()
     return path
 
-def astar_path(grid, start, goal, fire_set, risk_weight=5):
+def every_path_search(grid, start, goal):
     """
-    Uses A* search to find a path from start to goal.
-    Instead of completely blocking fire cells, this function penalizes cells that are
-    adjacent to fire (using risk_weight). Cells that are on fire are treated as blocked.
+    For each neighbor of the goal, run BFS to find the shortest path from start to that neighbor,
+    then append the goal to complete the path. This returns one candidate path per neighbor.
     """
-    def neighbors(pos):
-        return get_neighbors(pos, grid)
+    paths = []
+    paths_max = []
 
-    def cost(current, neighbor):
-        # Base cost 1 plus penalty for being adjacent to fire.
-        risk = 0
-        for di, dj in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-            adj = (neighbor[0] + di, neighbor[1] + dj)
-            if adj in fire_set:
-                risk += risk_weight
-        return 1 + risk
+    # Get neighbors of the goal (the button)
+    goal_neighbors = get_neighbors(goal, grid)
+    if not goal_neighbors:
+        return paths, paths_max
 
-    def heuristic(pos):
-        # Manhattan distance as heuristic.
-        return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
+    # For each neighbor, compute the BFS shortest path
+    for nbr in goal_neighbors:
+        path = bfs_path(grid, start, nbr)
+        if path is not None:
+            full_path = path + [goal]
+            paths.append(full_path)
+            paths_max.append(len(full_path))
 
-    open_set = []
-    heapq.heappush(open_set, (heuristic(start), 0, start))
-    came_from = {start: None}
-    g_score = {start: 0}
+    return paths, paths_max
 
-    while open_set:
-        _, current_g, current = heapq.heappop(open_set)
-        if current == goal:
-            path = []
-            while current is not None:
-                path.append(current)
-                current = came_from[current]
-            path.reverse()
-            return path
-        for nbr in neighbors(current):
-            if nbr in fire_set:  # treat on-fire cells as blocked
-                continue
-            tentative_g = g_score[current] + cost(current, nbr)
-            if nbr not in g_score or tentative_g < g_score[nbr]:
-                came_from[nbr] = current
-                g_score[nbr] = tentative_g
-                heapq.heappush(open_set, (tentative_g + heuristic(nbr), tentative_g, nbr))
-    return None
+def best_path(paths,path_max, fire_paths, fire_max,q):
+    # print("best_path_started")
+    best_path=0
+    fastest=MAXINT
+    path_info=[]
+    count=0
+    for i in range (0,len(paths)):
+        for j in range(0,len(fire_paths)):
+            if (paths[i][path_max[i]-1]==fire_paths[j][fire_max[j]-1]):
+                path_info.append([i,j])
+                count+=1
+    bp_found=False
+    for i,j in path_info:
+        if path_max[i] < fire_max[j]:
+            bp_found=True
+            if path_max[i]<fastest:
+                fastest=path_max[i]
+                best_path=i
+    if not bp_found:
+        modify_q=q+0.2
+        while (not bp_found):
+            # print("in while")
+            for i,j in path_info:
+                # print("in for loop")
+                # print(f" {path_max[i]*modify_q}  <    {fire_max[j]}")
+                if path_max[i]*modify_q < (fire_max[j]):
+                    bp_found=True
+                    if path_max[i]<fastest:
+                        fastest=path_max[i]
+                        best_path=i
+            if modify_q<0:
+                return
+            modify_q-=0.1
+            # print(f"stuck here in best_path  {modify_q}")
+    return paths[best_path]
+
+
+
+
+def goal_found(came_from,last_found,goal,nbr,curr):
+    cur=goal
+    path=[]
+    count=0
+    came_from[nbr]=curr
+    came_from[last_found]=goal
+    print(f"goal is {goal} last_found is {last_found}")
+    print(came_from)
+    while cur is not None:
+        path.append(cur)
+        # print(cur)
+        cur=came_from[cur]
+        count+=1
+    path.reverse()
+    return path, count
+
 
 #############################
 # Fire Spreading Function
 #############################
 
-def update_fire(grid, fire_set, q):
+def update_fire(grid, fire_set, q, goal):
     """
     Updates the set of burning cells (fire_set) simultaneously.
     For each open cell that is not burning, count K = number of burning neighbors.
     That cell catches fire with probability 1 - (1 - q)^K.
+    Button can't catch fire
     """
     D = len(grid)
     new_fire = set(fire_set)  # start with cells already burning
@@ -184,7 +225,7 @@ def update_fire(grid, fire_set, q):
                         K += 1
                 # Compute probability to catch fire
                 prob = 1 - (1 - q) ** K
-                if random.random() < prob:
+                if (random.random() < prob and goal!=(i,j)):
                     new_fire.add((i, j))
     return new_fire
 
@@ -252,16 +293,22 @@ class Bot3:
 # still trying to figure out exatly what to for this brainstorming
 #
 class Bot4:
-    def __init__(self, grid, button, risk_weight=5):
+    def __init__(self, grid, button, start, fire_start,q):
         self.grid = grid
         self.button = button
-        self.risk_weight = risk_weight
+        self.index= 0
+        paths,path_max =every_path_search(grid, start, button)
+        # print(f" these are the paths{paths}")
+        # print(f" {path_max}")
+        fire_paths, fire_max = every_path_search(grid, fire_start, button)
+        self.path=best_path(paths,path_max, fire_paths, fire_max,q)
 
     def next_move(self, bot_pos, fire_set):
-        path = astar_path(self.grid, bot_pos, self.button, fire_set, self.risk_weight)
-        if path is None or len(path) < 2:
-            return bot_pos
-        return path[1]
+        # Follow the precomputed path regardless of fire spread.
+        if self.index < len(self.path) - 1:
+            self.index += 1
+            return self.path[self.index]
+        return bot_pos  # no move if already at the end
 
 #############################
 # UI / Simulation with Pygame
@@ -277,12 +324,12 @@ GREEN    = (0, 255, 0)
 ORANGE   = (255, 165, 0)
 
 # Global parameters for the grid and simulation
-D = 50             # Grid dimensions (D x D)
+D = 30             # Grid dimensions (D x D)
 CELL_SIZE = 20     # Size of each cell in pixels
 WIDTH = D * CELL_SIZE
 HEIGHT = D * CELL_SIZE + 50  # extra space for text/status
 FPS = 5           # Simulation frames per second
-q = 0.8           # Flammability parameter
+q = 1.0           # Flammability parameter
 
 def draw_grid(screen, grid):
     """Draws the ship grid."""
@@ -324,7 +371,7 @@ def choose_bot_menu(screen):
     draw_text(screen, "1: Bot1 - Fixed Path (ignores fire spread)", (50, 100))
     draw_text(screen, "2: Bot2 - Replan every step (avoid fire)", (50, 130))
     draw_text(screen, "3: Bot3 - Replan & avoid adjacent fire", (50, 160))
-    draw_text(screen, "4: Bot4 - A* with risk penalty", (50, 190))
+    draw_text(screen, "4: Bot4 - Path with highest chance of success", (50, 190))
     draw_text(screen, "Press 1, 2, 3, or 4 to select", (50, 240))
     pygame.display.flip()
 
@@ -360,6 +407,9 @@ def run_simulation_ui(grid, bot_class, q):
     # Instantiate the bot (Bot1 requires the start and initial fire, others just need grid and button)
     if bot_class == Bot1:
         bot = Bot1(grid, bot_pos, button, initial_fire)
+    elif bot_class == Bot4:
+        print("ran")
+        bot = Bot4(grid,button,bot_pos,initial_fire,q)
     else:
         bot = bot_class(grid, button)
 
@@ -388,7 +438,7 @@ def run_simulation_ui(grid, bot_class, q):
             result_text = f"SUCCESS in {steps} steps!"
 
         # Spread the fire.
-        fire_set = update_fire(grid, fire_set, q)
+        fire_set = update_fire(grid, fire_set, q, button)
 
         # Check if bot is on a burning cell.
         if bot_pos in fire_set:
